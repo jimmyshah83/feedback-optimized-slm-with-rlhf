@@ -1,0 +1,43 @@
+model:
+  name: "microsoft/Phi-4-mini-instruct"
+  max_new_tokens: 512
+  temperature: 0.3
+
+embedding:
+  deployment: "text-embedding-3-small"
+  dimensions: 1536
+
+search:
+  index_name: "pubmedqa-index"
+  top_k: 5
+  semantic_config: "pubmedqa-semantic"
+
+data:
+  dataset_name: "qiaojin/PubMedQA"
+  dataset_split: "pqa_labeled"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  processed_file: "pubmedqa_processed.jsonl"
+
+evaluation:
+  samples: 50
+  metrics:
+    - faithfulness
+    - answer_relevancy
+    - context_precision
+    - context_recall
+
+training:
+  lora_rank: 16
+  lora_alpha: 32
+  lora_target_modules:
+    - "q_proj"
+    - "v_proj"
+  dpo_beta: 0.1
+  learning_rate: 5.0e-5
+  num_epochs: 3
+  per_device_batch_size: 4
+
+feedback:
+  cosmos_database: "rag-feedback"
+  cosmos_container: "feedback"

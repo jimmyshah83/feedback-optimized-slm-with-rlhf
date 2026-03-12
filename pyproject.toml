@@ -1,0 +1,64 @@
+[project]
+name = "feedback-optimized-slm-with-rlhf"
+version = "0.1.0"
+description = "RAG system on Phi-4-mini with DPO fine-tuning from human feedback, benchmarked with RAGAS, hosted on Azure."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=0.3",
+    "langchain-openai>=0.3",
+    "langchain-community>=0.3",
+    "azure-search-documents>=11.6",
+    "azure-identity>=1.19",
+    "azure-cosmos>=4.9",
+    "azure-storage-blob>=12.24",
+    "openai>=1.60",
+    "transformers>=4.48",
+    "trl>=0.14",
+    "peft>=0.14",
+    "datasets>=3.2",
+    "ragas>=0.2",
+    "gradio>=5.12",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "mlflow>=2.19",
+    "azureml-mlflow>=1.58",
+    "pydantic-settings>=2.7",
+    "typer>=0.15",
+    "rich>=13.9",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+]
+
+[project.scripts]
+download-data = "src.data.download_pubmedqa:main"
+preprocess = "src.data.preprocess:main"
+index-documents = "src.data.index_documents:main"
+rag-demo = "src.rag.pipeline:demo"
+rag-query = "src.rag.pipeline:query"
+benchmark = "src.evaluation.benchmarks:main"
+compare = "src.evaluation.compare:main"
+serve-feedback = "src.feedback.app:main"
+feedback-stats = "src.feedback.storage:stats"
+prepare-dpo = "src.training.prepare_dpo_data:main"
+train-dpo = "src.training.dpo_trainer:main"
+merge-adapter = "src.training.merge_adapter:main"
+orchestrate = "src.pipeline.orchestrator:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
