@@ -67,6 +67,16 @@ module mlWorkspace 'modules/ml_workspace.bicep' = {
   }
 }
 
+module roleAssignments 'modules/role_assignments.bicep' = {
+  scope: rg
+  name: 'roleAssignments'
+  params: {
+    searchServiceName: '${baseName}-search'
+    foundryPrincipalId: foundry.outputs.foundryPrincipalId
+  }
+  dependsOn: [foundry, search]
+}
+
 output resourceGroupName string = rg.name
 output searchEndpoint string = search.outputs.endpoint
 output foundryEndpoint string = foundry.outputs.endpoint

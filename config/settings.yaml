@@ -11,6 +11,24 @@ search:
   index_name: "pubmedqa-index"
   top_k: 5
   semantic_config: "pubmedqa-semantic"
+  query_type: "vector_semantic_hybrid"
+
+agent:
+  name: "pubmedqa-rag"
+  model: "gpt-54"
+  instructions: >
+    You are a medical question-answering assistant specialized in PubMedQA.
+    When answering questions:
+    1. Search the knowledge base for relevant medical literature.
+    2. Base your answer strictly on the retrieved context.
+    3. Provide a clear, concise answer followed by the reasoning.
+    4. End with a final decision: yes, no, or maybe.
+    5. If the evidence is insufficient, say so rather than guessing.
+
+    Format your response as:
+    **Answer:** [your detailed answer based on the evidence]
+
+    **Decision:** [yes/no/maybe]
 
 data:
   dataset_name: "qiaojin/PubMedQA"

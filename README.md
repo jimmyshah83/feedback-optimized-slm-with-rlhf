@@ -70,7 +70,41 @@ uv sync --all-extras
 
 # Configure Azure credentials
 cp .env.example .env
-# Edit .env with your Azure resource endpoints and keys
+# Edit .env — only endpoints are needed (managed identity, no API keys)
+```
+
+### Authentication
+
+This project uses **managed identity** throughout — no API keys are stored in `.env`.
+
+- **Azure AI Foundry** has local auth (API keys) disabled. All access goes through `DefaultAzureCredential`.
+- **Azure AI Search** uses RBAC. The Foundry's system-assigned managed identity is granted Search Index Data Reader.
+- Your user identity (via `az login`) needs these roles on the relevant resources:
+
+| Role | Resource | Purpose |
+|------|----------|---------|
+| **Cognitive Services OpenAI User** | AI Foundry account | Use embeddings + chat models |
+| **Search Index Data Contributor** | AI Search service | Upload documents to the index |
+| **Search Service Contributor** | AI Search service | Create/manage indexes |
+
+Assign roles via:
+
+```bash
+# Replace <principal-id> with your user object ID from `az ad signed-in-user show --query id -o tsv`
+PRINCIPAL_ID=$(az ad signed-in-user show --query id -o tsv)
+RG="ragrlhf-rg"
+
+az role assignment create --assignee $PRINCIPAL_ID \
+  --role "Cognitive Services OpenAI User" \
+  --scope /subscriptions/<sub>/resourceGroups/$RG/providers/Microsoft.CognitiveServices/accounts/ragrlhf-ai
+
+az role assignment create --assignee $PRINCIPAL_ID \
+  --role "Search Index Data Contributor" \
+  --scope /subscriptions/<sub>/resourceGroups/$RG/providers/Microsoft.Search/searchServices/ragrlhf-search
+
+az role assignment create --assignee $PRINCIPAL_ID \
+  --role "Search Service Contributor" \
+  --scope /subscriptions/<sub>/resourceGroups/$RG/providers/Microsoft.Search/searchServices/ragrlhf-search
 ```
 
 ### Infrastructure (Azure)
@@ -84,7 +118,25 @@ az deployment sub create \
   --parameters infrastructure/bicep/main.parameters.json
 ```
 
-This provisions: a resource group, Azure AI Search, Azure AI Foundry (with gpt-5.4, text-embedding-3-large, and an RLAIF project), Azure Cosmos DB, Azure Blob Storage, and Azure ML Workspace.
+This provisions:
+- **Resource group** (`ragrlhf-rg`)
+- **Azure AI Foundry** (with system-assigned managed identity, `disableLocalAuth: true`)
+  - gpt-5.4 (GlobalStandard) and text-embedding-3-large model deployments
+  - An RLAIF project (`rlaif-project`) for agent management and observability
+  - AI Search connection (AAD auth) for agent grounding
+- **Azure AI Search** (standard SKU with semantic search)
+- **Azure Cosmos DB** (for judge results, partitioned by `/question`)
+- **Azure Blob Storage** (for model checkpoints + LoRA adapters)
+- **Azure ML Workspace** (for experiment tracking + training)
+- **RBAC role assignments** (Foundry MI gets Search Index Data Reader + Search Service Contributor)
+
+After deployment, populate your `.env`:
+
+```bash
+# Get the project endpoint from deployment output
+az deployment sub show --name main --query properties.outputs.foundryProjectEndpoint.value -o tsv
+az deployment sub show --name main --query properties.outputs.searchEndpoint.value -o tsv
+```
 
 Preview changes before deploying:
 
@@ -111,13 +163,36 @@ uv run pytest tests/test_data.py -v   # Verify (14 tests)
 
 ### Phase 2: RAG Pipeline
 
-Index documents into Azure AI Search and build the RAG pipeline using Azure AI Agent Service with hybrid search grounding.
+Index documents into Azure AI Search, then create a persistent RAG agent in Azure AI Foundry with hybrid vector+semantic search grounding.
+
+**Step 1 — Index documents:**
 
 ```bash
-uv run index-documents         # Embed + index into Azure AI Search
-uv run rag-demo                # Run 5 sample queries
+uv run index-documents         # Embed with text-embedding-3-large + upload to Azure AI Search
+uv run index-documents --rebuild   # Recreate the index from scratch
+```
+
+This uses `AIProjectClient.get_openai_client()` for embeddings (managed identity, no API key) and `SearchIndexClient` with `DefaultAzureCredential` for index management. The index includes a vector field (3072d HNSW) and semantic search configuration.
+
+**Step 2 — Create agent and run queries:**
+
+```bash
+uv run rag-demo                # Create agent (if needed) + run 5 sample queries
 uv run rag-query               # Interactive single query
 ```
+
+The agent is created as a **persistent named resource** in Azure AI Foundry (`pubmedqa-rag`). It remains available in the Foundry portal across runs — it is never deleted programmatically. The agent uses:
+- **Model:** gpt-5.4 via the Foundry project
+- **Tool:** Azure AI Search with `vector_semantic_hybrid` query type
+- **Instructions:** Medical QA prompt with structured answer format
+
+On subsequent runs, the existing agent is reused (no duplicate creation). You can view and test the agent directly in the Foundry portal under Agents.
+
+**How it works:**
+1. `AIProjectClient.agents.get("pubmedqa-rag")` checks for an existing agent
+2. If not found, `agents.create_version()` creates a new `PromptAgentDefinition` with `AzureAISearchTool`
+3. Queries go through the OpenAI-compatible Assistants API via `project_client.get_openai_client()`
+4. The agent searches the index, retrieves relevant PubMedQA documents, and generates grounded answers
 
 ### Phase 3: Baseline Evaluation
 
@@ -169,20 +244,29 @@ uv run test-endpoint           # Send test query to endpoint
 ## Project Structure
 
 ```
-├── config/settings.yaml         # Model, search, judge, RL loop, training config
-├── infrastructure/bicep/        # Azure resource templates (Foundry v2 with Project)
+├── config/settings.yaml            # Model, search, agent, judge, RL loop, training config
+├── infrastructure/bicep/
+│   ├── main.bicep                  # Subscription-scope deployment orchestrator
+│   ├── main.parameters.json        # Default parameters (baseName, location)
+│   └── modules/
+│       ├── ai_search.bicep         # Azure AI Search (standard, semantic)
+│       ├── cosmos.bicep            # Cosmos DB (judge results)
+│       ├── foundry.bicep           # AI Foundry v2 (system MI, project, connection, models)
+│       ├── ml_workspace.bicep      # Azure ML Workspace
+│       ├── role_assignments.bicep  # RBAC (Foundry MI → Search)
+│       └── storage.bicep           # Blob Storage (model artifacts)
 ├── src/
-│   ├── config.py                # Pydantic settings from YAML + .env
-│   ├── data/                    # Download, preprocess, index
-│   ├── rag/                     # Azure AI Agent Service retriever, generator, pipeline
-│   ├── evaluation/              # Azure AI Evaluation benchmarks, comparison reports
-│   ├── judge/                   # AI judge (gpt-5.4) for RLAIF preference pairs
-│   ├── training/                # DPO data prep, QLoRA trainer, adapter merge
-│   ├── deployment/              # Azure ML model registration + endpoint deployment
-│   └── pipeline/                # RL loop orchestrator, Azure ML pipeline
-├── tests/                       # Phase-by-phase test suites
-├── pyproject.toml               # Dependencies + uv script entrypoints
-└── .env.example                 # Azure credential template
+│   ├── config.py                   # Pydantic settings from YAML + .env
+│   ├── data/                       # Download, preprocess, index
+│   ├── rag/                        # Azure AI Agent Service RAG pipeline
+│   ├── evaluation/                 # Azure AI Evaluation benchmarks, comparison
+│   ├── judge/                      # AI judge (gpt-5.4) for RLAIF preference pairs
+│   ├── training/                   # DPO data prep, QLoRA trainer, adapter merge
+│   ├── deployment/                 # Azure ML model registration + endpoint
+│   └── pipeline/                   # RL loop orchestrator, Azure ML pipeline
+├── tests/                          # Phase-by-phase test suites
+├── pyproject.toml                  # Dependencies + uv script entrypoints
+└── .env.example                    # Azure endpoint template (no API keys)
 ```
 
 ## CLI Commands (via `uv run`)
@@ -211,7 +295,8 @@ uv run test-endpoint           # Send test query to endpoint
 |---------|-------------|
 | **model** | Phi-4-mini-instruct, 512 max tokens, temperature 0.3 |
 | **embedding** | text-embedding-3-large, 3072 dimensions |
-| **search** | pubmedqa-index, top_k 5, semantic search |
+| **search** | pubmedqa-index, top_k 5, vector_semantic_hybrid query type |
+| **agent** | `pubmedqa-rag` named agent, gpt-54 model, medical QA instructions |
 | **judge** | gpt-54 deployment, rubric: medical accuracy, faithfulness, completeness, clarity |
 | **rl_loop** | 3 iterations, 800 questions/iteration, on-policy, convergence threshold 0.01 |
 | **training** | QLoRA rank 16, alpha 32, 4-bit quantization, DPO beta 0.1, lr 5e-5, 3 epochs |

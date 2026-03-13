@@ -10,7 +10,7 @@ build/
 .env
 
 # Data and outputs (large files)
-data/
+/data/
 outputs/
 
 # MLflow

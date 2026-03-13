@@ -22,16 +22,17 @@ resource aiServicesAccount 'Microsoft.CognitiveServices/accounts@2025-04-01-prev
   name: name
   location: location
   kind: 'AIServices'
-  sku: {
-    name: 'S0'
-  }
   identity: {
     type: 'SystemAssigned'
+  }
+  sku: {
+    name: 'S0'
   }
   properties: {
     customSubDomainName: name
     publicNetworkAccess: 'Enabled'
     allowProjectManagement: true
+    disableLocalAuth: true
   }
 }
 
@@ -39,9 +40,6 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2025-04-01-previ
   parent: aiServicesAccount
   name: projectName
   location: location
-  identity: {
-    type: 'SystemAssigned'
-  }
   properties: {}
 }
 
@@ -93,4 +91,5 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
 
 output endpoint string = aiServicesAccount.properties.endpoint
 output aiServicesAccountId string = aiServicesAccount.id
-output projectEndpoint string = project.properties.endpoints['AI Foundry API']
+output foundryPrincipalId string = aiServicesAccount.identity.principalId
+output projectEndpoint string = '${aiServicesAccount.properties.endpoint}/api/projects/${projectName}'

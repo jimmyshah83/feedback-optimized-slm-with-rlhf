@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -18,22 +17,17 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+class AzureAIProjectSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="AZURE_AI_")
+
+    project_endpoint: str = ""
+
+
 class AzureSearchSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AZURE_SEARCH_")
 
     endpoint: str = ""
-    key: str = ""
     index: str = "pubmedqa-index"
-
-
-class AzureOpenAISettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AZURE_OPENAI_")
-
-    endpoint: str = ""
-    api_key: str = ""
-    embedding_deployment: str = "text-embedding-3-large"
-    chat_deployment: str = "gpt-54"
-    api_version: str = "2024-10-21"
 
 
 class AzureCosmosSettings(BaseSettings):
@@ -60,12 +54,6 @@ class AzureStorageSettings(BaseSettings):
     container: str = "model-artifacts"
 
 
-class AzureAIProjectSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AZURE_AI_")
-
-    project_endpoint: str = ""
-
-
 class Settings(BaseSettings):
     """Central configuration loaded from config/settings.yaml + environment variables."""
 
@@ -77,14 +65,13 @@ class Settings(BaseSettings):
 
     yaml_config: dict[str, Any] = Field(default_factory=dict)
 
-    azure_search: AzureSearchSettings = Field(default_factory=AzureSearchSettings)
-    azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
-    azure_cosmos: AzureCosmosSettings = Field(default_factory=AzureCosmosSettings)
-    azure_ml: AzureMLSettings = Field(default_factory=AzureMLSettings)
-    azure_storage: AzureStorageSettings = Field(default_factory=AzureStorageSettings)
     azure_ai_project: AzureAIProjectSettings = Field(
         default_factory=AzureAIProjectSettings
     )
+    azure_search: AzureSearchSettings = Field(default_factory=AzureSearchSettings)
+    azure_cosmos: AzureCosmosSettings = Field(default_factory=AzureCosmosSettings)
+    azure_ml: AzureMLSettings = Field(default_factory=AzureMLSettings)
+    azure_storage: AzureStorageSettings = Field(default_factory=AzureStorageSettings)
 
     # --- Model ---
 
@@ -103,6 +90,10 @@ class Settings(BaseSettings):
     # --- Embedding ---
 
     @property
+    def embedding_deployment(self) -> str:
+        return self.yaml_config.get("embedding", {}).get("deployment", "text-embedding-3-large")
+
+    @property
     def embedding_dimensions(self) -> int:
         return self.yaml_config.get("embedding", {}).get("dimensions", 3072)
 
@@ -111,6 +102,10 @@ class Settings(BaseSettings):
     @property
     def search_top_k(self) -> int:
         return self.yaml_config.get("search", {}).get("top_k", 5)
+
+    @property
+    def search_semantic_config(self) -> str:
+        return self.yaml_config.get("search", {}).get("semantic_config", "pubmedqa-semantic")
 
     # --- Data ---
 
@@ -154,6 +149,16 @@ class Settings(BaseSettings):
             "metrics", ["groundedness", "relevance", "response_completeness"]
         )
 
+    # --- Agent ---
+
+    @property
+    def agent_name(self) -> str:
+        return self.yaml_config.get("agent", {}).get("name", "pubmedqa-rag")
+
+    @property
+    def agent_model(self) -> str:
+        return self.yaml_config.get("agent", {}).get("model", "gpt-54")
+
     # --- Judge ---
 
     @property
@@ -194,6 +199,9 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
     yaml_path = CONFIG_DIR / "settings.yaml"
     yaml_data = _load_yaml(yaml_path) if yaml_path.exists() else {}
     return Settings(yaml_config=yaml_data)
