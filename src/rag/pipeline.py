@@ -1,13 +1,17 @@
-"""End-to-end RAG pipeline using Azure AI Search + Azure OpenAI.
+"""End-to-end RAG pipeline: Azure AI Search retrieval + local SLM generation.
 
 Architecture:
-- Agent *definition* is stored in Azure AI Foundry (visible in the portal,
-  versioned via azure-ai-projects SDK).
-- Execution uses AzureOpenAI chat completions with manual retrieval from
-  Azure AI Search (vector + semantic hybrid search).
-- The Foundry Agent Service SDK (2.0.x) manages definitions but does not yet
-  expose a runtime invoke API, so we use the proven search-then-generate
-  pattern directly.
+- **Retrieval**: AzureOpenAI (text-embedding-3-large) embeds the query, then
+  Azure AI Search runs vector + semantic hybrid search.
+- **Generation**: Phi-4-mini running locally via Ollama produces the answer,
+  grounded in the retrieved evidence.
+- **Agent definition**: Stored in Azure AI Foundry for portal visibility and
+  versioning (the Foundry SDK manages definitions but does not yet expose a
+  runtime invoke API).
+
+This split mirrors the RLAIF pipeline: the SLM (phi-4-mini) is the model being
+improved, while Azure services provide the retrieval infrastructure and the AI
+judge (gpt-5.4) is only used for evaluation/preference generation.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ console = Console()
 
 
 # ---------------------------------------------------------------------------
-# Foundry agent definition (CRUD only — visible in the portal)
+# Foundry agent definition (CRUD — visible in the portal)
 # ---------------------------------------------------------------------------
 
 def _get_project_client():
@@ -30,13 +34,15 @@ def _get_project_client():
     from azure.identity import DefaultAzureCredential
 
     settings = get_settings()
-    project_endpoint = settings.azure_ai_project.project_endpoint
-    if not project_endpoint:
-        console.print("[red]AZURE_AI_PROJECT_ENDPOINT not set in .env[/red]")
+    endpoint = settings.azure_ai_project.project_endpoint
+    if not endpoint:
+        console.print(
+            "[red]AZURE_AI_PROJECT_ENDPOINT not set[/red]"
+        )
         raise typer.Exit(1)
 
     return AIProjectClient(
-        endpoint=project_endpoint,
+        endpoint=endpoint,
         credential=DefaultAzureCredential(),
     )
 
@@ -54,19 +60,23 @@ def _get_search_connection_id(project_client) -> str:
         pass
 
     for conn in project_client.connections.list():
-        if conn.type in (ConnectionType.AZURE_AI_SEARCH, "AzureAISearch"):
+        if conn.type in (
+            ConnectionType.AZURE_AI_SEARCH, "AzureAISearch"
+        ):
             return conn.id
 
     raise RuntimeError(
-        "No Azure AI Search connection found in the Foundry project. "
-        "Ensure the Bicep deployment created the 'ai-search-connection'."
+        "No Azure AI Search connection found. "
+        "Ensure Bicep created 'ai-search-connection'."
     )
 
 
 def _ensure_agent_definition(project_client, settings) -> str:
-    """Ensure the agent definition exists in Foundry (get-or-create).
+    """Ensure the agent definition exists in Foundry.
 
     Returns the agent version id (e.g. 'pubmedqa-rag:1').
+    The definition records which model and tools the agent
+    uses; it's visible and testable in the Foundry portal.
     """
     from azure.ai.projects.models import (
         AISearchIndexResource,
@@ -80,103 +90,122 @@ def _ensure_agent_definition(project_client, settings) -> str:
     agent_name = settings.agent_name
 
     try:
-        agent_details = project_client.agents.get(agent_name)
-        agent_id = agent_details.versions.latest.id
+        details = project_client.agents.get(agent_name)
+        aid = details.versions.latest.id
         console.print(
-            f"  [green]Found agent definition '{agent_name}' "
-            f"(id: {agent_id})[/green]"
+            f"  [green]Found agent '{agent_name}' "
+            f"(id: {aid})[/green]"
         )
-        return agent_id
+        return aid
     except (ResourceNotFoundError, Exception):
         pass
 
     console.print(
-        f"  [yellow]Agent '{agent_name}' not found — creating definition...[/yellow]"
+        f"  [yellow]Agent '{agent_name}' not found "
+        f"— creating...[/yellow]"
     )
 
-    search_conn_id = _get_search_connection_id(project_client)
+    conn_id = _get_search_connection_id(project_client)
 
-    query_type_str = settings.yaml_config.get("search", {}).get(
+    qt_str = settings.yaml_config.get("search", {}).get(
         "query_type", "vector_semantic_hybrid"
     )
-    query_type_map = {
+    qt_map = {
         "simple": AzureAISearchQueryType.SIMPLE,
         "semantic": AzureAISearchQueryType.SEMANTIC,
         "vector": AzureAISearchQueryType.VECTOR,
-        "vector_simple_hybrid": AzureAISearchQueryType.VECTOR_SIMPLE_HYBRID,
-        "vector_semantic_hybrid": AzureAISearchQueryType.VECTOR_SEMANTIC_HYBRID,
+        "vector_simple_hybrid": (
+            AzureAISearchQueryType.VECTOR_SIMPLE_HYBRID
+        ),
+        "vector_semantic_hybrid": (
+            AzureAISearchQueryType.VECTOR_SEMANTIC_HYBRID
+        ),
     }
-    query_type = query_type_map.get(
-        query_type_str, AzureAISearchQueryType.VECTOR_SEMANTIC_HYBRID
+    qt = qt_map.get(
+        qt_str,
+        AzureAISearchQueryType.VECTOR_SEMANTIC_HYBRID,
     )
 
     search_tool = AzureAISearchTool(
         azure_ai_search=AzureAISearchToolResource(
             indexes=[
                 AISearchIndexResource(
-                    project_connection_id=search_conn_id,
+                    project_connection_id=conn_id,
                     index_name=settings.azure_search.index,
-                    query_type=query_type,
+                    query_type=qt,
                     top_k=settings.search_top_k,
                 )
             ]
         )
     )
 
-    instructions = settings.yaml_config.get("agent", {}).get(
+    instructions = settings.yaml_config.get(
+        "agent", {}
+    ).get(
         "instructions",
-        (
-            "You are a medical question-answering assistant. "
-            "Search the knowledge base and provide evidence-based answers."
-        ),
+        "You are a medical QA assistant.",
     )
 
-    definition = PromptAgentDefinition(
+    defn = PromptAgentDefinition(
         model=settings.agent_model,
         instructions=instructions,
         tools=[search_tool],
         temperature=settings.temperature,
     )
 
-    agent_version = project_client.agents.create_version(
+    ver = project_client.agents.create_version(
         agent_name=agent_name,
-        definition=definition,
-        description="PubMedQA RAG agent — RLAIF pipeline",
+        definition=defn,
+        description="PubMedQA RAG — phi-4-mini SLM",
     )
 
     console.print(
-        f"  [green]Created agent definition '{agent_name}' "
-        f"(id: {agent_version.id})[/green]"
+        f"  [green]Created agent '{agent_name}' "
+        f"(id: {ver.id})[/green]"
     )
-    return agent_version.id
+    return ver.id
 
 
 # ---------------------------------------------------------------------------
-# Runtime: search + generate
+# Clients
 # ---------------------------------------------------------------------------
 
-def _get_openai_client():
-    """Get an AzureOpenAI client at the account level (not project-scoped)."""
-    from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+def _get_azure_openai_client():
+    """AzureOpenAI client for embeddings (account-level)."""
+    from azure.identity import (
+        DefaultAzureCredential,
+        get_bearer_token_provider,
+    )
     from openai import AzureOpenAI
 
     settings = get_settings()
-    project_endpoint = settings.azure_ai_project.project_endpoint
-    base_endpoint = project_endpoint.split("/api/projects/")[0]
+    endpoint = settings.azure_ai_project.project_endpoint
+    base = endpoint.split("/api/projects/")[0]
 
-    token_provider = get_bearer_token_provider(
+    tp = get_bearer_token_provider(
         DefaultAzureCredential(),
         "https://cognitiveservices.azure.com/.default",
     )
     return AzureOpenAI(
-        azure_endpoint=base_endpoint,
-        azure_ad_token_provider=token_provider,
+        azure_endpoint=base,
+        azure_ad_token_provider=tp,
         api_version="2025-03-01-preview",
     )
 
 
+def _get_slm_client():
+    """OpenAI-compatible client pointing at local Ollama."""
+    from openai import OpenAI
+
+    settings = get_settings()
+    return OpenAI(
+        base_url=settings.slm_ollama_base_url,
+        api_key="ollama",
+    )
+
+
 def _get_search_client():
-    """Get an Azure AI Search client for the pubmedqa index."""
+    """Azure AI Search client for the pubmedqa index."""
     from azure.identity import DefaultAzureCredential
     from azure.search.documents import SearchClient
 
@@ -188,31 +217,42 @@ def _get_search_client():
     )
 
 
-def _retrieve(openai_client, search_client, question: str, top_k: int = 5) -> list[dict]:
-    """Retrieve relevant documents using vector + semantic hybrid search."""
+# ---------------------------------------------------------------------------
+# Retrieve (Azure) + Generate (local SLM)
+# ---------------------------------------------------------------------------
+
+def _retrieve(
+    azure_client, search_client, question: str, top_k: int = 5
+) -> list[dict]:
+    """Embed the question and run hybrid search."""
     from azure.search.documents.models import VectorizedQuery
 
     settings = get_settings()
 
-    emb_resp = openai_client.embeddings.create(
+    emb = azure_client.embeddings.create(
         model=settings.embedding_deployment,
         input=[question],
     )
-    q_vector = emb_resp.data[0].embedding
+    q_vec = emb.data[0].embedding
 
     results = search_client.search(
         search_text=question,
         vector_queries=[
             VectorizedQuery(
-                vector=q_vector,
+                vector=q_vec,
                 k_nearest_neighbors=top_k,
                 fields="content_vector",
             )
         ],
         query_type="semantic",
-        semantic_configuration_name=settings.search_semantic_config,
+        semantic_configuration_name=(
+            settings.search_semantic_config
+        ),
         top=top_k,
-        select=["question", "context", "long_answer", "final_decision"],
+        select=[
+            "question", "context",
+            "long_answer", "final_decision",
+        ],
     )
 
     docs = []
@@ -226,34 +266,39 @@ def _retrieve(openai_client, search_client, question: str, top_k: int = 5) -> li
     return docs
 
 
-def _generate(openai_client, question: str, evidence: list[dict]) -> str:
-    """Generate an answer grounded in the retrieved evidence."""
+def _generate(
+    slm_client, question: str, evidence: list[dict]
+) -> str:
+    """Generate an answer using the local SLM (phi-4-mini)."""
     settings = get_settings()
 
-    context_parts = []
+    parts = []
     for i, doc in enumerate(evidence, 1):
-        context_parts.append(
+        parts.append(
             f"[{i}] Question: {doc['question']}\n"
             f"    Context: {doc['context'][:500]}\n"
             f"    Answer: {doc.get('long_answer', 'N/A')}\n"
-            f"    Decision: {doc.get('final_decision', 'N/A')}"
+            f"    Decision: "
+            f"{doc.get('final_decision', 'N/A')}"
         )
-    context_block = "\n\n".join(context_parts)
+    ctx = "\n\n".join(parts)
 
-    instructions = settings.yaml_config.get("agent", {}).get(
+    instructions = settings.yaml_config.get(
+        "agent", {}
+    ).get(
         "instructions",
-        (
-            "You are a medical question-answering assistant. "
-            "Use ONLY the provided evidence to answer."
-        ),
+        "You are a medical QA assistant. "
+        "Use ONLY the provided evidence.",
     )
 
-    response = openai_client.chat.completions.create(
-        model=settings.agent_model,
+    response = slm_client.chat.completions.create(
+        model=settings.slm_ollama_model,
         messages=[
             {
                 "role": "system",
-                "content": f"{instructions}\n\nEvidence:\n{context_block}",
+                "content": (
+                    f"{instructions}\n\nEvidence:\n{ctx}"
+                ),
             },
             {"role": "user", "content": question},
         ],
@@ -263,20 +308,26 @@ def _generate(openai_client, question: str, evidence: list[dict]) -> str:
 
 
 def query_rag(question: str) -> dict:
-    """Run the full RAG pipeline: retrieve then generate.
+    """Full RAG pipeline: retrieve (Azure) then generate (local SLM).
 
-    Returns a dict with 'question', 'answer', 'evidence' keys.
+    Returns dict with 'question', 'answer', 'evidence'.
     """
-    openai_client = _get_openai_client()
+    azure_client = _get_azure_openai_client()
+    slm_client = _get_slm_client()
     search_client = _get_search_client()
     settings = get_settings()
 
     evidence = _retrieve(
-        openai_client, search_client, question, top_k=settings.search_top_k
+        azure_client, search_client, question,
+        top_k=settings.search_top_k,
     )
-    answer = _generate(openai_client, question, evidence)
+    answer = _generate(slm_client, question, evidence)
 
-    return {"question": question, "answer": answer, "evidence": evidence}
+    return {
+        "question": question,
+        "answer": answer,
+        "evidence": evidence,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -288,54 +339,89 @@ def demo() -> None:
     settings = get_settings()
 
     console.print("[bold]Initializing RAG pipeline...[/bold]")
+    console.print(
+        f"  SLM: [cyan]{settings.slm_ollama_model}[/cyan] "
+        f"via Ollama ({settings.slm_ollama_base_url})"
+    )
+    console.print(
+        "  Embeddings: [cyan]"
+        f"{settings.embedding_deployment}[/cyan] via Azure"
+    )
+    console.print(
+        "  Search: [cyan]"
+        f"{settings.azure_search.index}[/cyan] "
+        "(vector + semantic hybrid)"
+    )
 
     project_client = _get_project_client()
     _ensure_agent_definition(project_client, settings)
 
-    openai_client = _get_openai_client()
+    azure_client = _get_azure_openai_client()
+    slm_client = _get_slm_client()
     search_client = _get_search_client()
 
-    demo_questions = [
-        "Does aspirin reduce the risk of cardiovascular events?",
-        "Is metformin effective for type 2 diabetes management?",
-        "Can regular exercise reduce the risk of Alzheimer's disease?",
-        "Does vitamin D supplementation prevent fractures in elderly patients?",
-        "Is there evidence that statins reduce mortality in heart disease patients?",
+    questions = [
+        "Does aspirin reduce the risk of cardiovascular "
+        "events?",
+        "Is metformin effective for type 2 diabetes "
+        "management?",
+        "Can regular exercise reduce the risk of "
+        "Alzheimer's disease?",
+        "Does vitamin D supplementation prevent "
+        "fractures in elderly patients?",
+        "Is there evidence that statins reduce mortality "
+        "in heart disease patients?",
     ]
 
-    for i, question in enumerate(demo_questions, 1):
-        console.print(f"\n[bold cyan]Question {i}:[/bold cyan] {question}")
+    for i, q in enumerate(questions, 1):
+        console.print(f"\n[bold cyan]Question {i}:[/bold cyan] {q}")
         try:
             evidence = _retrieve(
-                openai_client, search_client, question,
+                azure_client, search_client, q,
                 top_k=settings.search_top_k,
             )
-            console.print(f"  [dim]Retrieved {len(evidence)} documents[/dim]")
-
-            answer = _generate(openai_client, question, evidence)
-            console.print(f"[bold green]Response:[/bold green]\n{answer}")
+            console.print(
+                f"  [dim]Retrieved {len(evidence)} docs[/dim]"
+            )
+            answer = _generate(slm_client, q, evidence)
+            console.print(
+                f"[bold green]Response:[/bold green]\n{answer}"
+            )
         except Exception as exc:
             console.print(f"[red]Error: {exc}[/red]")
-        console.print("─" * 80)
+        console.print("─" * 72)
 
     console.print(
-        f"\n[bold green]Demo complete — agent '{settings.agent_name}' "
-        f"persists in Foundry.[/bold green]"
+        f"\n[bold green]Demo complete — agent "
+        f"'{settings.agent_name}' persists in "
+        f"Foundry.[/bold green]"
     )
 
 
 def query() -> None:
-    """Run a single interactive query through the RAG pipeline."""
+    """Interactive single query through the RAG pipeline."""
     settings = get_settings()
 
     console.print("[bold]Initializing RAG pipeline...[/bold]")
+    console.print(
+        f"  SLM: [cyan]{settings.slm_ollama_model}[/cyan] "
+        f"via Ollama"
+    )
 
     project_client = _get_project_client()
     _ensure_agent_definition(project_client, settings)
 
     question = typer.prompt("Enter your medical question")
-    console.print(f"\n[bold cyan]Question:[/bold cyan] {question}")
+    console.print(
+        f"\n[bold cyan]Question:[/bold cyan] {question}"
+    )
 
     result = query_rag(question)
-    console.print(f"  [dim]Retrieved {len(result['evidence'])} documents[/dim]")
-    console.print(f"[bold green]Response:[/bold green]\n{result['answer']}")
+    console.print(
+        f"  [dim]Retrieved {len(result['evidence'])} "
+        f"docs[/dim]"
+    )
+    console.print(
+        f"[bold green]Response:[/bold green]\n"
+        f"{result['answer']}"
+    )

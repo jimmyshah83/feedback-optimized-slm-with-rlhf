@@ -3,6 +3,10 @@ model:
   max_new_tokens: 512
   temperature: 0.3
 
+slm:
+  ollama_base_url: "http://localhost:11434/v1"
+  ollama_model: "phi4-mini"
+
 embedding:
   deployment: "text-embedding-3-large"
   dimensions: 3072
@@ -15,7 +19,7 @@ search:
 
 agent:
   name: "pubmedqa-rag"
-  model: "gpt-54"
+  model: "phi4-mini"
   instructions: >
     You are a medical question-answering assistant specialized in PubMedQA.
     When answering questions:

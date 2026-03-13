@@ -149,6 +149,20 @@ class Settings(BaseSettings):
             "metrics", ["groundedness", "relevance", "response_completeness"]
         )
 
+    # --- SLM (local Ollama) ---
+
+    @property
+    def slm_ollama_base_url(self) -> str:
+        return self.yaml_config.get("slm", {}).get(
+            "ollama_base_url", "http://localhost:11434/v1"
+        )
+
+    @property
+    def slm_ollama_model(self) -> str:
+        return self.yaml_config.get("slm", {}).get(
+            "ollama_model", "phi4-mini"
+        )
+
     # --- Agent ---
 
     @property
@@ -157,7 +171,7 @@ class Settings(BaseSettings):
 
     @property
     def agent_model(self) -> str:
-        return self.yaml_config.get("agent", {}).get("model", "gpt-54")
+        return self.yaml_config.get("agent", {}).get("model", "phi4-mini")
 
     # --- Judge ---
 

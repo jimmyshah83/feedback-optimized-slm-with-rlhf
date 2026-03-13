@@ -1,6 +1,6 @@
 # Feedback-Optimized SLM with RLAIF
 
-A reusable pattern for iteratively improving a Small Language Model using **RLAIF** (Reinforcement Learning from AI Feedback). Built on **Microsoft Phi-4-mini** (3.8B), fine-tuned with **DPO** via an AI judge (gpt-5.4), benchmarked with **Azure AI Evaluation SDK**, with RAG powered by **Azure AI Agent Service** — all hosted on **Microsoft Azure**.
+A reusable pattern for iteratively improving a Small Language Model using **RLAIF** (Reinforcement Learning from AI Feedback). Built on **Microsoft Phi-4-mini** (3.8B) running locally via **Ollama**, fine-tuned with **DPO** via an AI judge (gpt-5.4), benchmarked with **Azure AI Evaluation SDK**, with retrieval powered by **Azure AI Search** — a hybrid local+cloud architecture on **Microsoft Azure**.
 
 ## The RLAIF Pattern
 
@@ -11,7 +11,7 @@ This project implements an **iterative, on-policy DPO loop** where a strong AI m
 │  For each iteration i = 1..N:                                   │
 │                                                                 │
 │  1. Phi-4-mini (policy_i) generates RAG responses               │
-│     for 800 training questions via Azure AI Agent Service       │
+│     for 800 training questions via Ollama (local)               │
 │                                                                 │
 │  2. gpt-5.4 (AI judge) evaluates responses against gold        │
 │     answers → preference pairs (chosen / rejected)              │
@@ -39,9 +39,10 @@ This project implements an **iterative, on-policy DPO loop** where a strong AI m
 
 | Component | Technology |
 |-----------|-----------|
-| **SLM (policy model)** | Microsoft Phi-4-mini-instruct (3.8B) |
+| **SLM (policy model)** | Microsoft Phi-4-mini (3.8B) via Ollama (local) — swappable after each DPO iteration |
 | **AI Judge** | gpt-5.4 via native Azure OpenAI SDK |
-| **RAG** | Azure AI Search (vector + semantic hybrid) + AzureOpenAI chat completions, agent definition managed via `azure-ai-projects` |
+| **RAG retrieval** | Azure AI Search (vector + semantic hybrid) with AzureOpenAI embeddings (text-embedding-3-large) |
+| **RAG generation** | Phi-4-mini via Ollama (OpenAI-compatible API at `localhost:11434`) |
 | **Evaluation** | Azure AI Evaluation SDK (`azure-ai-evaluation`) |
 | **Training** | TRL `DPOTrainer` + PEFT QLoRA + bitsandbytes 4-bit |
 | **Data** | PubMedQA (1,000 expert-annotated medical QA pairs) |
@@ -54,6 +55,7 @@ This project implements an **iterative, on-policy DPO loop** where a strong AI m
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
+- [Ollama](https://ollama.com/) for local SLM inference
 - Azure subscription with `az login` completed
 - Azure resources deployed (see Infrastructure below)
 
@@ -71,6 +73,9 @@ uv sync --all-extras
 # Configure Azure credentials
 cp .env.example .env
 # Edit .env — only endpoints are needed (managed identity, no API keys)
+
+# Pull the SLM model for local inference
+ollama pull phi4-mini
 ```
 
 ### Authentication
@@ -163,7 +168,7 @@ uv run pytest tests/test_data.py -v   # Verify (14 tests)
 
 ### Phase 2: RAG Pipeline
 
-Index documents into Azure AI Search, then create a persistent RAG agent in Azure AI Foundry with hybrid vector+semantic search grounding.
+Index documents into Azure AI Search, then run the RAG pipeline using **phi-4-mini (local via Ollama)** for generation and **Azure AI Search** for retrieval.
 
 **Step 1 — Index documents:**
 
@@ -174,27 +179,30 @@ uv run index-documents --rebuild   # Recreate the index from scratch
 
 This uses `AzureOpenAI` with `DefaultAzureCredential` for embeddings (managed identity, no API key) and `SearchIndexClient` with `DefaultAzureCredential` for index management. The index includes a vector field (3072d HNSW) and semantic search configuration.
 
-**Step 2 — Create agent and run queries:**
+**Step 2 — Run queries (requires Ollama running):**
 
 ```bash
-uv run rag-demo                # Create agent (if needed) + run 5 sample queries
+ollama serve                   # Start Ollama (if not running as a service)
+uv run rag-demo                # Create agent def + run 5 sample queries via phi-4-mini
 uv run rag-query               # Interactive single query
 ```
 
-The agent is created as a **persistent named resource** in Azure AI Foundry (`pubmedqa-rag`). It remains available in the Foundry portal across runs — it is never deleted programmatically. The agent uses:
-- **Model:** gpt-5.4 via the Foundry project
-- **Tool:** Azure AI Search with `vector_semantic_hybrid` query type
-- **Instructions:** Medical QA prompt with structured answer format
+**Architecture — split local + cloud:**
 
-On subsequent runs, the existing agent is reused (no duplicate creation). You can view and test the agent directly in the Foundry portal under Agents.
+| Component | Where | What |
+|-----------|-------|------|
+| **Generation** | Local (Ollama) | Phi-4-mini answers questions grounded in evidence |
+| **Embeddings** | Azure (Foundry) | text-embedding-3-large encodes queries for search |
+| **Retrieval** | Azure (AI Search) | Vector + semantic hybrid search over pubmedqa-index |
+| **Agent definition** | Azure (Foundry) | `pubmedqa-rag` agent visible in Foundry portal |
 
-**How it works:**
-1. `AIProjectClient.agents.get("pubmedqa-rag")` checks for an existing agent definition in Foundry
-2. If not found, `agents.create_version()` creates a new `PromptAgentDefinition` with `AzureAISearchTool`
-3. At runtime, queries use a **search-then-generate** pattern: `AzureOpenAI` embeds the question, `SearchClient` runs vector + semantic hybrid search against the index, and `AzureOpenAI` chat completions generates a grounded answer from the retrieved evidence
-4. The agent definition in Foundry stores the canonical configuration (model, instructions, search tool) and is visible/testable in the Foundry portal
+The agent definition is stored as a **persistent named resource** in Azure AI Foundry, visible in the portal. At runtime, queries use a **search-then-generate** pattern:
 
-> **Note:** The `azure-ai-projects` v2.x SDK manages agent definitions but does not yet expose a runtime invoke API, so execution uses the direct AzureOpenAI + Azure AI Search pattern.
+1. `AzureOpenAI` embeds the question (text-embedding-3-large)
+2. `SearchClient` runs vector + semantic hybrid search against the index
+3. **Phi-4-mini via Ollama** generates a grounded answer from the retrieved evidence
+
+> **Why local?** Each DPO iteration produces new model weights. Running phi-4-mini locally lets us swap in fine-tuned models instantly — no redeployment needed. The same Ollama OpenAI-compatible API (`localhost:11434/v1`) works for base and fine-tuned models.
 
 ### Phase 3: Baseline Evaluation
 
@@ -296,9 +304,10 @@ uv run test-endpoint           # Send test query to endpoint
 | Section | Key settings |
 |---------|-------------|
 | **model** | Phi-4-mini-instruct, 512 max tokens, temperature 0.3 |
+| **slm** | Ollama base URL `localhost:11434/v1`, model `phi4-mini` |
 | **embedding** | text-embedding-3-large, 3072 dimensions |
 | **search** | pubmedqa-index, top_k 5, vector_semantic_hybrid query type |
-| **agent** | `pubmedqa-rag` named agent, gpt-54 model, medical QA instructions |
+| **agent** | `pubmedqa-rag` named agent, phi4-mini model, medical QA instructions |
 | **judge** | gpt-54 deployment, rubric: medical accuracy, faithfulness, completeness, clarity |
 | **rl_loop** | 3 iterations, 800 questions/iteration, on-policy, convergence threshold 0.01 |
 | **training** | QLoRA rank 16, alpha 32, 4-bit quantization, DPO beta 0.1, lr 5e-5, 3 epochs |
