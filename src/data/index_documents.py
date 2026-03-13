@@ -115,8 +115,6 @@ def run(
     from azure.search.documents import SearchClient
     from azure.search.documents.indexes import SearchIndexClient
 
-    from azure.ai.projects import AIProjectClient
-
     settings = get_settings()
     credential = DefaultAzureCredential()
 
@@ -152,14 +150,25 @@ def run(
     )
     console.print(f"  [green]Index '{index_name}' ready[/green]")
 
-    # --- Get OpenAI client from Foundry project (managed identity) ---
+    # --- Get AzureOpenAI client for embeddings (managed identity) ---
+    # Embeddings use the Foundry account endpoint, not the project-scoped path
     project_endpoint = settings.azure_ai_project.project_endpoint
     if not project_endpoint:
         console.print("[red]AZURE_AI_PROJECT_ENDPOINT not set in .env[/red]")
         raise typer.Exit(1)
 
-    project_client = AIProjectClient(endpoint=project_endpoint, credential=credential)
-    openai_client = project_client.get_openai_client()
+    from azure.identity import get_bearer_token_provider
+    from openai import AzureOpenAI
+
+    base_endpoint = project_endpoint.split("/api/projects/")[0]
+    token_provider = get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"
+    )
+    openai_client = AzureOpenAI(
+        azure_endpoint=base_endpoint,
+        azure_ad_token_provider=token_provider,
+        api_version="2024-10-21",
+    )
     embedding_model = settings.embedding_deployment
 
     console.print(

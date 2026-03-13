@@ -92,4 +92,5 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
 output endpoint string = aiServicesAccount.properties.endpoint
 output aiServicesAccountId string = aiServicesAccount.id
 output foundryPrincipalId string = aiServicesAccount.identity.principalId
-output projectEndpoint string = '${aiServicesAccount.properties.endpoint}/api/projects/${projectName}'
+var baseEndpoint = endsWith(aiServicesAccount.properties.endpoint, '/') ? substring(aiServicesAccount.properties.endpoint, 0, length(aiServicesAccount.properties.endpoint) - 1) : aiServicesAccount.properties.endpoint
+output projectEndpoint string = '${baseEndpoint}/api/projects/${projectName}'

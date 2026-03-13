@@ -14,6 +14,11 @@ resource searchService 'Microsoft.Search/searchServices@2024-03-01-preview' = {
     partitionCount: 1
     hostingMode: 'default'
     semanticSearch: 'standard'
+    authOptions: {
+      aadOrApiKey: {
+        aadAuthFailureMode: 'http401WithBearerChallenge'
+      }
+    }
   }
 }
 
