@@ -1,4 +1,4 @@
-"""Tests for Phase 2: RAG pipeline (index + agent)."""
+"""Tests for Phase 2: RAG pipeline (index + retrieve + generate)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 
 
 class TestIndexDocuments:
-    """Unit tests for document loading and index creation helpers."""
+    """Unit tests for document loading and embedding helpers."""
 
     def test_load_documents(self, tmp_path: Path) -> None:
         from src.data.index_documents import _load_documents
@@ -55,60 +55,94 @@ class TestIndexDocuments:
 
 
 class TestRagPipeline:
-    """Unit tests for RAG pipeline helpers."""
+    """Unit tests for RAG retrieve + generate helpers."""
 
-    def test_build_search_tool(self) -> None:
-        from src.config import get_settings
-        from src.rag.pipeline import _build_search_tool
+    def test_retrieve_calls_search(self) -> None:
+        """_retrieve embeds the question and calls hybrid search."""
+        from src.rag.pipeline import _retrieve
 
-        get_settings.cache_clear()
-        settings = get_settings()
-        tool = _build_search_tool("test-connection-id", settings)
+        mock_oai = MagicMock()
+        mock_oai.embeddings.create.return_value.data = [
+            MagicMock(embedding=[0.1] * 3072)
+        ]
 
-        assert tool.azure_ai_search is not None
-        indexes = tool.azure_ai_search.indexes
-        assert len(indexes) == 1
-        assert indexes[0].project_connection_id == "test-connection-id"
-        assert indexes[0].index_name == settings.azure_search.index
-        assert indexes[0].top_k == settings.search_top_k
+        mock_result = MagicMock()
+        mock_result.__getitem__ = lambda self, k: {
+            "question": "Q1?",
+            "context": "C1",
+            "long_answer": "A1",
+            "final_decision": "yes",
+        }[k]
+        mock_result.get = lambda k, d="": {
+            "question": "Q1?",
+            "context": "C1",
+            "long_answer": "A1",
+            "final_decision": "yes",
+        }.get(k, d)
 
-    def test_query_agent_extracts_text(self) -> None:
-        from src.rag.pipeline import _query_agent
+        mock_search = MagicMock()
+        mock_search.search.return_value = [mock_result]
 
-        mock_client = MagicMock()
-        mock_thread = MagicMock()
-        mock_thread.id = "thread-123"
-        mock_client.beta.threads.create.return_value = mock_thread
+        docs = _retrieve(mock_oai, mock_search, "test?", top_k=3)
 
-        mock_run = MagicMock()
-        mock_run.status = "completed"
-        mock_client.beta.threads.runs.create_and_poll.return_value = mock_run
+        assert len(docs) == 1
+        assert docs[0]["question"] == "Q1?"
+        assert docs[0]["context"] == "C1"
+        mock_oai.embeddings.create.assert_called_once()
+        mock_search.search.assert_called_once()
 
-        mock_text_block = MagicMock()
-        mock_text_block.text.value = "The answer is yes."
-        mock_msg = MagicMock()
-        mock_msg.role = "assistant"
-        mock_msg.content = [mock_text_block]
-        mock_client.beta.threads.messages.list.return_value.data = [mock_msg]
+    def test_generate_returns_response(self) -> None:
+        """_generate sends evidence + question to the model."""
+        from src.rag.pipeline import _generate
 
-        result = _query_agent(mock_client, "agent-id", "Does it work?")
+        mock_oai = MagicMock()
+        mock_oai.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="The answer is yes."))
+        ]
+
+        evidence = [
+            {"question": "Q1?", "context": "C1", "long_answer": "A1", "final_decision": "yes"},
+        ]
+        result = _generate(mock_oai, "Does it work?", evidence)
         assert result == "The answer is yes."
+        mock_oai.chat.completions.create.assert_called_once()
 
-    def test_query_agent_raises_on_failure(self) -> None:
-        from src.rag.pipeline import _query_agent
+    def test_generate_includes_all_evidence(self) -> None:
+        """All evidence docs appear in the system prompt."""
+        from src.rag.pipeline import _generate
+
+        mock_oai = MagicMock()
+        mock_oai.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="Answer"))
+        ]
+
+        evidence = [
+            {"question": f"Q{i}?", "context": f"C{i}", "long_answer": f"A{i}", "final_decision": "yes"}
+            for i in range(3)
+        ]
+        _generate(mock_oai, "Test?", evidence)
+
+        call_args = mock_oai.chat.completions.create.call_args
+        system_msg = call_args.kwargs["messages"][0]["content"]
+        for i in range(3):
+            assert f"Q{i}?" in system_msg
+            assert f"C{i}" in system_msg
+
+    def test_ensure_agent_definition_returns_existing(self) -> None:
+        """When agent exists in Foundry, return its id without creating."""
+        from src.rag.pipeline import _ensure_agent_definition
 
         mock_client = MagicMock()
-        mock_thread = MagicMock()
-        mock_thread.id = "thread-456"
-        mock_client.beta.threads.create.return_value = mock_thread
+        mock_agent = MagicMock()
+        mock_agent.versions.latest.id = "pubmedqa-rag:1"
+        mock_client.agents.get.return_value = mock_agent
 
-        mock_run = MagicMock()
-        mock_run.status = "failed"
-        mock_run.last_error = "Rate limit exceeded"
-        mock_client.beta.threads.runs.create_and_poll.return_value = mock_run
+        settings = MagicMock()
+        settings.agent_name = "pubmedqa-rag"
 
-        with pytest.raises(RuntimeError, match="Agent run failed"):
-            _query_agent(mock_client, "agent-id", "Will this fail?")
+        result = _ensure_agent_definition(mock_client, settings)
+        assert result == "pubmedqa-rag:1"
+        mock_client.agents.create_version.assert_not_called()
 
 
 class TestConfigPhase2:

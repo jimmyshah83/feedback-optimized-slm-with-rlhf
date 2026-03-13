@@ -41,7 +41,7 @@ This project implements an **iterative, on-policy DPO loop** where a strong AI m
 |-----------|-----------|
 | **SLM (policy model)** | Microsoft Phi-4-mini-instruct (3.8B) |
 | **AI Judge** | gpt-5.4 via native Azure OpenAI SDK |
-| **RAG** | Azure AI Agent Service (`azure-ai-projects`) with Azure AI Search grounding |
+| **RAG** | Azure AI Search (vector + semantic hybrid) + AzureOpenAI chat completions, agent definition managed via `azure-ai-projects` |
 | **Evaluation** | Azure AI Evaluation SDK (`azure-ai-evaluation`) |
 | **Training** | TRL `DPOTrainer` + PEFT QLoRA + bitsandbytes 4-bit |
 | **Data** | PubMedQA (1,000 expert-annotated medical QA pairs) |
@@ -78,7 +78,7 @@ cp .env.example .env
 This project uses **managed identity** throughout — no API keys are stored in `.env`.
 
 - **Azure AI Foundry** has local auth (API keys) disabled. All access goes through `DefaultAzureCredential`.
-- **Azure AI Search** uses RBAC. The Foundry's system-assigned managed identity is granted Search Index Data Reader.
+- **Azure AI Search** has RBAC data plane auth enabled (`aadOrApiKey`). The Foundry's system-assigned managed identity is granted Search Index Data Reader.
 - Your user identity (via `az login`) needs these roles on the relevant resources:
 
 | Role | Resource | Purpose |
@@ -172,7 +172,7 @@ uv run index-documents         # Embed with text-embedding-3-large + upload to A
 uv run index-documents --rebuild   # Recreate the index from scratch
 ```
 
-This uses `AIProjectClient.get_openai_client()` for embeddings (managed identity, no API key) and `SearchIndexClient` with `DefaultAzureCredential` for index management. The index includes a vector field (3072d HNSW) and semantic search configuration.
+This uses `AzureOpenAI` with `DefaultAzureCredential` for embeddings (managed identity, no API key) and `SearchIndexClient` with `DefaultAzureCredential` for index management. The index includes a vector field (3072d HNSW) and semantic search configuration.
 
 **Step 2 — Create agent and run queries:**
 
@@ -189,10 +189,12 @@ The agent is created as a **persistent named resource** in Azure AI Foundry (`pu
 On subsequent runs, the existing agent is reused (no duplicate creation). You can view and test the agent directly in the Foundry portal under Agents.
 
 **How it works:**
-1. `AIProjectClient.agents.get("pubmedqa-rag")` checks for an existing agent
+1. `AIProjectClient.agents.get("pubmedqa-rag")` checks for an existing agent definition in Foundry
 2. If not found, `agents.create_version()` creates a new `PromptAgentDefinition` with `AzureAISearchTool`
-3. Queries go through the OpenAI-compatible Assistants API via `project_client.get_openai_client()`
-4. The agent searches the index, retrieves relevant PubMedQA documents, and generates grounded answers
+3. At runtime, queries use a **search-then-generate** pattern: `AzureOpenAI` embeds the question, `SearchClient` runs vector + semantic hybrid search against the index, and `AzureOpenAI` chat completions generates a grounded answer from the retrieved evidence
+4. The agent definition in Foundry stores the canonical configuration (model, instructions, search tool) and is visible/testable in the Foundry portal
+
+> **Note:** The `azure-ai-projects` v2.x SDK manages agent definitions but does not yet expose a runtime invoke API, so execution uses the direct AzureOpenAI + Azure AI Search pattern.
 
 ### Phase 3: Baseline Evaluation
 
@@ -258,7 +260,7 @@ uv run test-endpoint           # Send test query to endpoint
 ├── src/
 │   ├── config.py                   # Pydantic settings from YAML + .env
 │   ├── data/                       # Download, preprocess, index
-│   ├── rag/                        # Azure AI Agent Service RAG pipeline
+│   ├── rag/                        # RAG pipeline (search + generate) with Foundry agent def
 │   ├── evaluation/                 # Azure AI Evaluation benchmarks, comparison
 │   ├── judge/                      # AI judge (gpt-5.4) for RLAIF preference pairs
 │   ├── training/                   # DPO data prep, QLoRA trainer, adapter merge
