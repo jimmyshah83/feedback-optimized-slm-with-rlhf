@@ -4,8 +4,8 @@ model:
   temperature: 0.3
 
 embedding:
-  deployment: "text-embedding-3-small"
-  dimensions: 1536
+  deployment: "text-embedding-3-large"
+  dimensions: 3072
 
 search:
   index_name: "pubmedqa-index"
@@ -18,14 +18,31 @@ data:
   raw_dir: "data/raw"
   processed_dir: "data/processed"
   processed_file: "pubmedqa_processed.jsonl"
+  train_count: 800
+  eval_count: 200
 
 evaluation:
-  samples: 50
+  eval_samples: 200
   metrics:
+    - groundedness
+    - relevance
+    - response_completeness
+
+judge:
+  chat_deployment: "gpt-54"
+  temperature: 0.0
+  max_tokens: 2048
+  rubric_dimensions:
+    - medical_accuracy
     - faithfulness
-    - answer_relevancy
-    - context_precision
-    - context_recall
+    - completeness
+    - clarity
+
+rl_loop:
+  iterations: 3
+  questions_per_iteration: 800
+  data_policy: "on_policy"
+  convergence_threshold: 0.01
 
 training:
   lora_rank: 16
@@ -33,11 +50,12 @@ training:
   lora_target_modules:
     - "q_proj"
     - "v_proj"
+  quantization_bits: 4
   dpo_beta: 0.1
   learning_rate: 5.0e-5
   num_epochs: 3
   per_device_batch_size: 4
 
-feedback:
-  cosmos_database: "rag-feedback"
-  cosmos_container: "feedback"
+cosmos:
+  database: "rag-feedback"
+  container: "judge-results"

@@ -114,3 +114,29 @@ class TestConfigLoading:
         get_settings.cache_clear()
         settings = get_settings()
         assert "Phi-4" in settings.model_name or "phi-4" in settings.model_name.lower()
+
+    def test_rl_loop_config(self) -> None:
+        from src.config import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        assert settings.rl_iterations == 3
+        assert settings.rl_questions_per_iteration == 800
+        assert settings.rl_convergence_threshold == 0.01
+
+    def test_judge_config(self) -> None:
+        from src.config import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        assert settings.judge_chat_deployment == "gpt-54"
+        assert "medical_accuracy" in settings.judge_rubric_dimensions
+
+    def test_data_split_counts(self) -> None:
+        from src.config import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        assert settings.train_count == 800
+        assert settings.eval_count == 200
+        assert settings.train_count + settings.eval_count == 1000

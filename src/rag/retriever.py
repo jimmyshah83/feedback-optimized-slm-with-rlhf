@@ -1,1 +1,1 @@
-"""Azure AI Search hybrid retriever. (Phase 2)"""
+"""Azure AI Search hybrid retriever via Azure AI Agent Service. (Phase 2)"""

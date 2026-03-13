@@ -9,20 +9,56 @@ param chatDeploymentName string = 'gpt-54'
 @description('Embedding model deployment name')
 param embeddingDeploymentName string = 'text-embedding-3-large'
 
-resource aiServicesAccount 'Microsoft.CognitiveServices/accounts@2024-04-01-preview' = {
+@description('Project name within the Foundry account')
+param projectName string = 'rlaif-project'
+
+@description('Azure AI Search service resource ID for connection')
+param searchServiceId string = ''
+
+@description('Azure AI Search endpoint for connection')
+param searchEndpoint string = ''
+
+resource aiServicesAccount 'Microsoft.CognitiveServices/accounts@2025-04-01-preview' = {
   name: name
   location: location
   kind: 'AIServices'
   sku: {
     name: 'S0'
   }
+  identity: {
+    type: 'SystemAssigned'
+  }
   properties: {
     customSubDomainName: name
     publicNetworkAccess: 'Enabled'
+    allowProjectManagement: true
   }
 }
 
-resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-04-01-preview' = {
+resource project 'Microsoft.CognitiveServices/accounts/projects@2025-04-01-preview' = {
+  parent: aiServicesAccount
+  name: projectName
+  location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {}
+}
+
+resource searchConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = if (!empty(searchServiceId)) {
+  parent: aiServicesAccount
+  name: 'ai-search-connection'
+  properties: {
+    category: 'CognitiveSearch'
+    target: searchEndpoint
+    authType: 'AAD'
+    metadata: {
+      ResourceId: searchServiceId
+    }
+  }
+}
+
+resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-04-01-preview' = {
   parent: aiServicesAccount
   name: chatDeploymentName
   sku: {
@@ -38,7 +74,7 @@ resource chatDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-0
   }
 }
 
-resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-04-01-preview' = {
+resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-04-01-preview' = {
   parent: aiServicesAccount
   name: embeddingDeploymentName
   sku: {
@@ -57,3 +93,4 @@ resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
 
 output endpoint string = aiServicesAccount.properties.endpoint
 output aiServicesAccountId string = aiServicesAccount.id
+output projectEndpoint string = project.properties.endpoints['AI Foundry API']

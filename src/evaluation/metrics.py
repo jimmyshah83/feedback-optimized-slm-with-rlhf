@@ -1,1 +1,1 @@
-"""Custom medical QA metrics. (Phase 3)"""
+"""Custom medical QA metrics (PubMedQA accuracy, AI judge win-rate). (Phase 3)"""

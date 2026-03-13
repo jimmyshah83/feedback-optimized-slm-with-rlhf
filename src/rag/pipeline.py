@@ -1,4 +1,4 @@
-"""End-to-end RAG chain. (Phase 2)"""
+"""End-to-end RAG pipeline using Azure AI Agent Service. (Phase 2)"""
 
 from __future__ import annotations
 

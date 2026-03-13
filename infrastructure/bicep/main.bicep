@@ -43,6 +43,8 @@ module foundry 'modules/foundry.bicep' = {
     location: location
     chatDeploymentName: chatDeploymentName
     embeddingDeploymentName: embeddingDeploymentName
+    searchServiceId: search.outputs.searchServiceId
+    searchEndpoint: search.outputs.endpoint
   }
 }
 
@@ -68,6 +70,7 @@ module mlWorkspace 'modules/ml_workspace.bicep' = {
 output resourceGroupName string = rg.name
 output searchEndpoint string = search.outputs.endpoint
 output foundryEndpoint string = foundry.outputs.endpoint
+output foundryProjectEndpoint string = foundry.outputs.projectEndpoint
 output cosmosEndpoint string = cosmos.outputs.endpoint
 output storageAccountName string = storage.outputs.storageAccountName
 output mlWorkspaceName string = mlWorkspace.outputs.workspaceName

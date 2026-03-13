@@ -1,4 +1,4 @@
-"""Merge LoRA adapter into base model. (Phase 5)"""
+"""Merge LoRA adapter into base Phi-4-mini model. (Phase 5)"""
 
 from __future__ import annotations
 

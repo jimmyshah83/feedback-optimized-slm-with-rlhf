@@ -1,14 +1,13 @@
 [project]
 name = "feedback-optimized-slm-with-rlhf"
-version = "0.1.0"
-description = "RAG system on Phi-4-mini with DPO fine-tuning from human feedback, benchmarked with RAGAS, hosted on Azure."
+version = "0.2.0"
+description = "Iterative RLAIF pipeline: RAG on Phi-4-mini with DPO fine-tuning from AI feedback (gpt-5.4 judge), benchmarked with Azure AI Evaluation, hosted on Azure."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "langchain>=0.3",
-    "langchain-openai>=0.3",
-    "langchain-community>=0.3",
+    "azure-ai-projects>=1.0.0rc4",
+    "azure-ai-evaluation>=1.16",
     "azure-search-documents>=11.6",
     "azure-identity>=1.19",
     "azure-cosmos>=4.9",
@@ -17,11 +16,8 @@ dependencies = [
     "transformers>=4.48",
     "trl>=0.14",
     "peft>=0.14",
+    "bitsandbytes>=0.45",
     "datasets>=3.2",
-    "ragas>=0.2",
-    "gradio>=5.12",
-    "fastapi>=0.115",
-    "uvicorn>=0.34",
     "mlflow>=2.19",
     "azureml-mlflow>=1.58",
     "pydantic-settings>=2.7",
@@ -44,13 +40,15 @@ index-documents = "src.data.index_documents:main"
 rag-demo = "src.rag.pipeline:demo"
 rag-query = "src.rag.pipeline:query"
 benchmark = "src.evaluation.benchmarks:main"
-compare = "src.evaluation.compare:main"
-serve-feedback = "src.feedback.app:main"
-feedback-stats = "src.feedback.storage:stats"
+judge = "src.judge.ai_judge:main"
 prepare-dpo = "src.training.prepare_dpo_data:main"
 train-dpo = "src.training.dpo_trainer:main"
 merge-adapter = "src.training.merge_adapter:main"
-orchestrate = "src.pipeline.orchestrator:main"
+compare = "src.evaluation.compare:main"
+rl-loop = "src.pipeline.orchestrator:main"
+register-model = "src.deployment.register:main"
+deploy-model = "src.deployment.deploy:main"
+test-endpoint = "src.deployment.deploy:test"
 
 [build-system]
 requires = ["hatchling"]
