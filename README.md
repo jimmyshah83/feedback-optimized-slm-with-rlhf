@@ -266,21 +266,86 @@ uv run pytest tests/test_judge.py -v             # Unit tests (15 tests)
 
 ### Phase 5: DPO Training
 
-Train Phi-4-mini with DPO using the AI judge's preference pairs and QLoRA for efficiency.
+Train Phi-4-mini with DPO using the AI judge's preference pairs and LoRA for efficiency. Supports **QLoRA (4-bit)** on CUDA and **LoRA (FP16)** on Apple Silicon (MPS).
 
 ```bash
-uv run prepare-dpo --iteration 0       # Format pairs for DPOTrainer
-uv run train-dpo --iteration 0         # QLoRA DPO fine-tuning
-uv run merge-adapter --iteration 0     # Merge LoRA into base model
+uv run prepare-dpo --iteration 0       # Format judge pairs for DPOTrainer
+uv run train-dpo --iteration 0         # LoRA DPO fine-tuning
+uv run merge-adapter --iteration 0     # Merge LoRA adapter into base model
+uv run pytest tests/test_training.py -v  # Unit tests (10 tests)
 ```
+
+**What happens:**
+
+1. **Prepare DPO data** — reads `data/judge/preferences_iter{N}.jsonl`, constructs prompts with RAG context + instructions, and outputs `data/training/iter{N}/dpo_data/train.jsonl` in the format DPOTrainer expects (prompt, chosen, rejected)
+2. **DPO training** — loads Phi-4-mini with LoRA (rank 16, targeting `qkv_proj` + `o_proj`), trains for 3 epochs with TRL `DPOTrainer`, saves adapter to `data/training/iter{N}/adapter/`
+3. **Merge adapter** — loads base model + LoRA adapter, merges weights, saves full merged model to `data/training/iter{N}/merged/`
+
+**Hardware support:**
+
+| Device | Quantization | Dtype | Batch Size |
+|--------|-------------|-------|------------|
+| **CUDA** | 4-bit (QLoRA via bitsandbytes) | BF16 | 4 |
+| **MPS** (Apple Silicon) | None (LoRA only) | FP16 | 2 |
+| **CPU** | None (LoRA only) | FP32 | 1 |
+
+**Training output:**
+
+```
+data/training/iter0/
+├── dpo_data/train.jsonl     # DPO-formatted preference pairs
+├── adapter/                 # LoRA adapter weights + config
+│   ├── adapter_config.json
+│   ├── adapter_model.safetensors
+│   └── tokenizer files
+└── merged/                  # Full merged model (base + LoRA)
+    ├── model.safetensors
+    ├── config.json
+    └── tokenizer files
+```
+
+> **Trainable parameters:** With LoRA rank 16 on `qkv_proj` + `o_proj`, only 0.19% of parameters (7.3M / 3.8B) are trained, keeping memory usage manageable on consumer hardware.
 
 ### Phase 6: RL Loop
 
-Orchestrate the full iterative RLAIF pipeline: generate -> judge -> train -> benchmark -> repeat for N iterations.
+Orchestrate the full iterative RLAIF pipeline: **judge → prepare → train → merge → benchmark → repeat** for N iterations, with automatic convergence detection.
 
 ```bash
-uv run rl-loop --iterations 3 --questions 800 --eval-samples 200
-uv run compare                 # Cross-iteration comparison report
+uv run rl-loop --iterations 3 --questions 800 --eval-samples 200    # Full loop
+uv run rl-loop --iterations 1 --questions 5 --eval-samples 3 --skip-training   # Smoke test
+uv run compare                                                       # Cross-iteration report
+uv run pytest tests/test_orchestrator.py -v                         # Unit tests (7 tests)
+```
+
+**What happens per iteration:**
+
+1. **AI Judge** — generates preference pairs for training questions using current policy model
+2. **Prepare DPO** — formats pairs for DPOTrainer
+3. **DPO Training** — fine-tunes the model (uses previous iteration's merged model as base)
+4. **Merge Adapter** — produces updated full model
+5. **Benchmark** — evaluates on held-out set, scores with Azure AI Evaluation
+
+**Convergence:** The loop monitors `relevance` score across iterations. If the delta falls below `convergence_threshold` (default 0.01), the loop stops early.
+
+**Comparison report (`uv run compare`):**
+
+```
+┌──────────┬──────────────┬──────────────┬───────────┬──────────────┐
+│ Iteration│ PubMedQA Acc │ Groundedness │ Relevance │ Completeness │
+├──────────┼──────────────┼──────────────┼───────────┼──────────────┤
+│        0 │       65.0%  │         3.20 │      3.50 │         3.80 │
+│        1 │       71.0%  │         3.60 │      3.90 │         4.10 │
+│        2 │       73.0%  │         3.80 │      4.00 │         4.20 │
+└──────────┴──────────────┴──────────────┴───────────┴──────────────┘
+```
+
+**Loop output:**
+
+```
+data/rl_loop/history.json           # Metrics for all iterations
+data/judge/preferences_iter{N}.jsonl  # Preference pairs per iteration
+data/training/iter{N}/              # Model artifacts per iteration
+data/evaluations/rl_iter{N}_*.jsonl # Benchmark results per iteration
 ```
 
 ### Phase 7: Model Deployment
@@ -352,7 +417,7 @@ uv run test-endpoint           # Send test query to endpoint
 | **agent** | `pubmedqa-rag` named agent, phi4-mini model, medical QA instructions |
 | **judge** | gpt-54 deployment, rubric: medical accuracy, faithfulness, completeness, clarity |
 | **rl_loop** | 3 iterations, 800 questions/iteration, on-policy, convergence threshold 0.01 |
-| **training** | QLoRA rank 16, alpha 32, 4-bit quantization, DPO beta 0.1, lr 5e-5, 3 epochs |
+| **training** | LoRA rank 16 on `qkv_proj` + `o_proj`, alpha 32, DPO beta 0.1, lr 5e-5, 3 epochs |
 | **evaluation** | Groundedness, Relevance, Response Completeness (Azure AI Evaluation SDK) |
 
 ## License

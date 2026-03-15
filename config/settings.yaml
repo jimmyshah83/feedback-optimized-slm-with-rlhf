@@ -70,8 +70,8 @@ training:
   lora_rank: 16
   lora_alpha: 32
   lora_target_modules:
-    - "q_proj"
-    - "v_proj"
+    - "qkv_proj"
+    - "o_proj"
   quantization_bits: 4
   dpo_beta: 0.1
   learning_rate: 5.0e-5
