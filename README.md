@@ -206,13 +206,32 @@ The agent definition is stored as a **persistent named resource** in Azure AI Fo
 
 ### Phase 3: Baseline Evaluation
 
-Benchmark the base Phi-4-mini RAG pipeline on the held-out evaluation set using Azure AI Evaluation SDK.
+Benchmark the base Phi-4-mini RAG pipeline on the held-out evaluation set (200 questions) using **Azure AI Evaluation SDK**. Results are scored by gpt-5.4 and logged to Azure AI Foundry for portal visibility.
 
 ```bash
-uv run benchmark --tag baseline --samples 200
+ollama serve                                    # Ensure Ollama is running
+uv run benchmark --tag baseline --samples 200   # Full eval set (200 questions)
+uv run benchmark --tag smoke --samples 5        # Quick smoke test
+uv run pytest tests/test_evaluation.py -v       # Unit tests
 ```
 
-Metrics: Groundedness, Relevance, Response Completeness (via gpt-5.4 evaluator), plus PubMedQA classification accuracy.
+**What happens:**
+
+1. **Generate responses** — runs phi-4-mini RAG (Ollama + Azure AI Search) on each eval question
+2. **PubMedQA classification accuracy** — extracts yes/no/maybe from model output and compares to gold labels
+3. **Azure AI Evaluation** — gpt-5.4 scores each response for Groundedness, Relevance, and Response Completeness (1–5 scale)
+4. **Upload to Foundry** — results are logged to your Azure AI Foundry project and visible in the portal under "Evaluations"
+
+**Metrics produced:**
+
+| Metric | Source | Scale |
+|--------|--------|-------|
+| `groundedness` | Azure AI Evaluation (gpt-5.4 judge) | 1–5 |
+| `relevance` | Azure AI Evaluation (gpt-5.4 judge) | 1–5 |
+| `response_completeness` | Azure AI Evaluation (gpt-5.4 judge) | 1–5 |
+| `pubmedqa_accuracy` | Custom (yes/no/maybe classification) | 0–100% |
+
+Results are saved to `data/evaluations/` as both per-row JSONL and a JSON summary. The Foundry portal URL is printed at the end of the run.
 
 ### Phase 4: AI Judge
 
