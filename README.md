@@ -235,11 +235,34 @@ Results are saved to `data/evaluations/` as both per-row JSONL and a JSON summar
 
 ### Phase 4: AI Judge
 
-Run the AI judge to generate preference pairs. For each training question, Phi-4-mini generates two candidate responses; gpt-5.4 judges which is better using the gold answer as reference.
+Generate **DPO preference pairs** using gpt-5.4 as the AI judge. For each training question, phi-4-mini produces two candidate responses at different temperatures (0.3 and 0.9), then gpt-5.4 evaluates both against the PubMedQA gold answer on four rubric dimensions.
 
 ```bash
-uv run judge --iteration 0     # Generate preference pairs for base model
+ollama serve                                     # Ensure Ollama is running
+uv run judge --iteration 0 --samples 800         # Full training set
+uv run judge --iteration 0 --samples 10          # Quick smoke test
+uv run pytest tests/test_judge.py -v             # Unit tests (15 tests)
 ```
+
+**What happens:**
+
+1. **Load training set** — first 800 questions from `pubmedqa_processed.jsonl`
+2. **Generate two candidates** — phi-4-mini via Ollama answers each question twice (low temp for precision, high temp for diversity)
+3. **AI judge evaluation** — gpt-5.4 scores both candidates on medical accuracy, faithfulness, completeness, and clarity (1–5 each)
+4. **Preference pair** — the higher-scored response becomes `chosen`, the lower becomes `rejected`
+
+**Output:** `data/judge/preferences_iter{N}.jsonl` — one JSON object per line with `chosen`, `rejected`, rubric scores, and the full judge verdict. These pairs feed directly into Phase 5 (DPO training).
+
+**Rubric dimensions:**
+
+| Dimension | What the judge evaluates |
+|-----------|------------------------|
+| `medical_accuracy` | Factual correctness relative to the gold answer |
+| `faithfulness` | How well grounded in the retrieved evidence |
+| `completeness` | Coverage of key points from the gold answer |
+| `clarity` | Structure, readability, and final decision |
+
+> **Rate limiting:** gpt-5.4 calls include automatic retry with exponential backoff (60–120s). For the S0 tier, 800 questions takes approximately 1–2 hours depending on quota.
 
 ### Phase 5: DPO Training
 

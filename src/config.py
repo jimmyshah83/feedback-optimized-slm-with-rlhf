@@ -190,6 +190,14 @@ class Settings(BaseSettings):
             ["medical_accuracy", "faithfulness", "completeness", "clarity"],
         )
 
+    @property
+    def judge_temperature(self) -> float:
+        return self.judge_config.get("temperature", 0.0)
+
+    @property
+    def judge_max_tokens(self) -> int:
+        return self.judge_config.get("max_tokens", 2048)
+
     # --- RL Loop ---
 
     @property
